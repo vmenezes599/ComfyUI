@@ -1,0 +1,3 @@
+[submodule "ComfyUI-Docker"]
+	path = ComfyUI-Docker
+	url = git@github.com:vmenezes599/ComfyUI-Docker.git
