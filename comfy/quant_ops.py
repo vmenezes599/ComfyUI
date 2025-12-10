@@ -1,6 +1,7 @@
 import torch
 import logging
 from typing import Tuple, Dict
+import comfy.float
 
 _LAYOUT_REGISTRY = {}
 _GENERIC_UTILS = {}
@@ -74,6 +75,12 @@ def _copy_layout_params(params):
             new_params[k] = v
     return new_params
 
+def _copy_layout_params_inplace(src, dst, non_blocking=False):
+    for k, v in src.items():
+        if isinstance(v, torch.Tensor):
+            dst[k].copy_(v, non_blocking=non_blocking)
+        else:
+            dst[k] = v
 
 class QuantizedLayout:
     """
@@ -222,6 +229,17 @@ class QuantizedTensor(torch.Tensor):
         new_kwargs = dequant_arg(kwargs)
         return func(*new_args, **new_kwargs)
 
+    def data_ptr(self):
+        return self._qdata.data_ptr()
+
+    def is_pinned(self):
+        return self._qdata.is_pinned()
+
+    def is_contiguous(self, *arg, **kwargs):
+        return self._qdata.is_contiguous(*arg, **kwargs)
+
+    def storage(self):
+        return self._qdata.storage()
 
 # ==============================================================================
 # Generic Utilities (Layout-Agnostic Operations)
@@ -234,12 +252,6 @@ def _create_transformed_qtensor(qt, transform_fn):
 
 
 def _handle_device_transfer(qt, target_device, target_dtype=None, target_layout=None, op_name="to"):
-    if target_dtype is not None and target_dtype != qt.dtype:
-        logging.warning(
-            f"QuantizedTensor: dtype conversion requested to {target_dtype}, "
-            f"but not supported for quantized tensors. Ignoring dtype."
-        )
-
     if target_layout is not None and target_layout != torch.strided:
         logging.warning(
             f"QuantizedTensor: layout change requested to {target_layout}, "
@@ -259,6 +271,8 @@ def _handle_device_transfer(qt, target_device, target_dtype=None, target_layout=
             logging.debug(f"QuantizedTensor.{op_name}: Moving from {current_device} to {target_device}")
             new_q_data = qt._qdata.to(device=target_device)
             new_params = _move_layout_params_to_device(qt._layout_params, target_device)
+            if target_dtype is not None:
+                new_params["orig_dtype"] = target_dtype
             new_qt = QuantizedTensor(new_q_data, qt._layout_type, new_params)
             logging.debug(f"QuantizedTensor.{op_name}: Created new tensor on {target_device}")
             return new_qt
@@ -318,13 +332,15 @@ def generic_to_dtype_layout(func, args, kwargs):
 def generic_copy_(func, args, kwargs):
     qt_dest = args[0]
     src = args[1]
-
+    non_blocking = args[2] if len(args) > 2 else False
     if isinstance(qt_dest, QuantizedTensor):
         if isinstance(src, QuantizedTensor):
             # Copy from another quantized tensor
-            qt_dest._qdata.copy_(src._qdata)
+            qt_dest._qdata.copy_(src._qdata, non_blocking=non_blocking)
             qt_dest._layout_type = src._layout_type
-            qt_dest._layout_params = _copy_layout_params(src._layout_params)
+            orig_dtype = qt_dest._layout_params["orig_dtype"]
+            _copy_layout_params_inplace(src._layout_params, qt_dest._layout_params, non_blocking=non_blocking)
+            qt_dest._layout_params["orig_dtype"] = orig_dtype
         else:
             # Copy from regular tensor - just copy raw data
             qt_dest._qdata.copy_(src)
@@ -332,9 +348,41 @@ def generic_copy_(func, args, kwargs):
     return func(*args, **kwargs)
 
 
+@register_generic_util(torch.ops.aten.to.dtype)
+def generic_to_dtype(func, args, kwargs):
+    """Handle .to(dtype) calls - dtype conversion only."""
+    src = args[0]
+    if isinstance(src, QuantizedTensor):
+        # For dtype-only conversion, just change the orig_dtype, no real cast is needed
+        target_dtype = args[1] if len(args) > 1 else kwargs.get('dtype')
+        src._layout_params["orig_dtype"] = target_dtype
+        return src
+    return func(*args, **kwargs)
+
+
 @register_generic_util(torch.ops.aten._has_compatible_shallow_copy_type.default)
 def generic_has_compatible_shallow_copy_type(func, args, kwargs):
     return True
+
+
+@register_generic_util(torch.ops.aten.empty_like.default)
+def generic_empty_like(func, args, kwargs):
+    """Empty_like operation - creates an empty tensor with the same quantized structure."""
+    qt = args[0]
+    if isinstance(qt, QuantizedTensor):
+        # Create empty tensor with same shape and dtype as the quantized data
+        hp_dtype = kwargs.pop('dtype', qt._layout_params["orig_dtype"])
+        new_qdata = torch.empty_like(qt._qdata, **kwargs)
+
+        # Handle device transfer for layout params
+        target_device = kwargs.get('device', new_qdata.device)
+        new_params = _move_layout_params_to_device(qt._layout_params, target_device)
+
+        # Update orig_dtype if dtype is specified
+        new_params['orig_dtype'] = hp_dtype
+
+        return QuantizedTensor(new_qdata, qt._layout_type, new_params)
+    return func(*args, **kwargs)
 
 # ==============================================================================
 # FP8 Layout + Operation Handlers
@@ -347,37 +395,57 @@ class TensorCoreFP8Layout(QuantizedLayout):
     - orig_dtype: Original dtype before quantization (for casting back)
     """
     @classmethod
-    def quantize(cls, tensor, scale=None, dtype=torch.float8_e4m3fn):
+    def quantize(cls, tensor, scale=None, dtype=torch.float8_e4m3fn, stochastic_rounding=0, inplace_ops=False):
         orig_dtype = tensor.dtype
 
-        if scale is None:
-            scale = torch.amax(tensor.abs()) / torch.finfo(dtype).max
+        if isinstance(scale, str) and scale == "recalculate":
+            scale = torch.amax(tensor.abs()).to(dtype=torch.float32) / torch.finfo(dtype).max
+            if tensor.dtype not in [torch.float32, torch.bfloat16]:  # Prevent scale from being too small
+                tensor_info = torch.finfo(tensor.dtype)
+                scale = (1.0 / torch.clamp((1.0 / scale), min=tensor_info.min, max=tensor_info.max))
 
-        if not isinstance(scale, torch.Tensor):
-            scale = torch.tensor(scale)
-        scale = scale.to(device=tensor.device, dtype=torch.float32)
+        if scale is not None:
+            if not isinstance(scale, torch.Tensor):
+                scale = torch.tensor(scale)
+            scale = scale.to(device=tensor.device, dtype=torch.float32)
 
-        tensor_scaled = tensor * (1.0 / scale).to(tensor.dtype)
-        # TODO: uncomment this if it's actually needed because the clamp has a small performance penality'
-        # lp_amax = torch.finfo(dtype).max
-        # torch.clamp(tensor_scaled, min=-lp_amax, max=lp_amax, out=tensor_scaled)
-        qdata = tensor_scaled.to(dtype, memory_format=torch.contiguous_format)
+            if inplace_ops:
+                tensor *= (1.0 / scale).to(tensor.dtype)
+            else:
+                tensor = tensor * (1.0 / scale).to(tensor.dtype)
+        else:
+            scale = torch.ones((), device=tensor.device, dtype=torch.float32)
+
+        if stochastic_rounding > 0:
+            tensor = comfy.float.stochastic_rounding(tensor, dtype=dtype, seed=stochastic_rounding)
+        else:
+            lp_amax = torch.finfo(dtype).max
+            torch.clamp(tensor, min=-lp_amax, max=lp_amax, out=tensor)
+            tensor = tensor.to(dtype, memory_format=torch.contiguous_format)
 
         layout_params = {
             'scale': scale,
             'orig_dtype': orig_dtype
         }
-        return qdata, layout_params
+        return tensor, layout_params
 
     @staticmethod
     def dequantize(qdata, scale, orig_dtype, **kwargs):
         plain_tensor = torch.ops.aten._to_copy.default(qdata, dtype=orig_dtype)
-        return plain_tensor * scale
+        plain_tensor.mul_(scale)
+        return plain_tensor
 
     @classmethod
     def get_plain_tensors(cls, qtensor):
         return qtensor._qdata, qtensor._layout_params['scale']
 
+QUANT_ALGOS = {
+    "float8_e4m3fn": {
+        "storage_t": torch.float8_e4m3fn,
+        "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "TensorCoreFP8Layout",
+    },
+}
 
 LAYOUTS = {
     "TensorCoreFP8Layout": TensorCoreFP8Layout,
