@@ -454,6 +454,9 @@ class ModelPatcher:
     def set_model_post_input_patch(self, patch):
         self.set_model_patch(patch, "post_input")
 
+    def set_model_noise_refiner_patch(self, patch):
+        self.set_model_patch(patch, "noise_refiner")
+
     def set_model_rope_options(self, scale_x, shift_x, scale_y, shift_y, scale_t, shift_t, **kwargs):
         rope_options = self.model_options["transformer_options"].get("rope_options", {})
         rope_options["scale_x"] = scale_x
@@ -715,6 +718,7 @@ class ModelPatcher:
                             continue
 
                 cast_weight = self.force_cast_weights
+                m.comfy_force_cast_weights = self.force_cast_weights
                 if lowvram_weight:
                     if hasattr(m, "comfy_cast_weights"):
                         m.weight_function = []
@@ -787,11 +791,12 @@ class ModelPatcher:
                 for param in params:
                     self.pin_weight_to_device("{}.{}".format(n, param))
 
+            usable_stat = "{:.2f} MB usable,".format(lowvram_model_memory / (1024 * 1024)) if lowvram_model_memory < 1e32 else ""
             if lowvram_counter > 0:
-                logging.info("loaded partially; {:.2f} MB usable, {:.2f} MB loaded, {:.2f} MB offloaded, {:.2f} MB buffer reserved, lowvram patches: {}".format(lowvram_model_memory / (1024 * 1024), mem_counter / (1024 * 1024), lowvram_mem_counter / (1024 * 1024), offload_buffer / (1024 * 1024), patch_counter))
+                logging.info("loaded partially; {} {:.2f} MB loaded, {:.2f} MB offloaded, {:.2f} MB buffer reserved, lowvram patches: {}".format(usable_stat, mem_counter / (1024 * 1024), lowvram_mem_counter / (1024 * 1024), offload_buffer / (1024 * 1024), patch_counter))
                 self.model.model_lowvram = True
             else:
-                logging.info("loaded completely; {:.2f} MB usable, {:.2f} MB loaded, full load: {}".format(lowvram_model_memory / (1024 * 1024), mem_counter / (1024 * 1024), full_load))
+                logging.info("loaded completely; {} {:.2f} MB loaded, full load: {}".format(usable_stat, mem_counter / (1024 * 1024), full_load))
                 self.model.model_lowvram = False
                 if full_load:
                     self.model.to(device_to)
