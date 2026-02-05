@@ -1,3 +1,33 @@
 [submodule "ComfyUI-Docker"]
 	path = ComfyUI-Docker
 	url = git@github.com:vmenezes599/ComfyUI-Docker.git
+[submodule "vendor/ComfyUI-Clever-Tales"]
+	path = vendor/ComfyUI-Clever-Tales
+	url = git@github.com:vmenezes599/ComfyUI-Clever-Tales.git
+[submodule "vendor/ComfyUI-Manager"]
+	path = vendor/ComfyUI-Manager
+	url = https://github.com/Comfy-Org/ComfyUI-Manager.git
+[submodule "vendor/ComfyUI-Image-Saver"]
+	path = vendor/ComfyUI-Image-Saver
+	url = https://github.com/giriss/comfy-image-saver.git
+[submodule "vendor/ComfyUI-GGUF"]
+	path = vendor/ComfyUI-GGUF
+	url = https://github.com/city96/ComfyUI-GGUF.git
+[submodule "vendor/ComfyUI-VideoHelperSuite"]
+	path = vendor/ComfyUI-VideoHelperSuite
+	url = https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+[submodule "vendor/ComfyUI-Frame-Interpolation"]
+	path = vendor/ComfyUI-Frame-Interpolation
+	url = https://github.com/Fannovel16/ComfyUI-Frame-Interpolation
+[submodule "vendor/ComfyUI-rgthree"]
+	path = vendor/ComfyUI-rgthree
+	url = https://github.com/rgthree/rgthree-comfy.git
+[submodule "vendor/ComfyUI-essentials"]
+	path = vendor/ComfyUI-essentials
+	url = https://github.com/cubiq/ComfyUI_essentials.git
+[submodule "vendor/ComfyUI-Crystools"]
+	path = vendor/ComfyUI-Crystools
+	url = https://github.com/crystian/ComfyUI-Crystools.git
+[submodule "vendor/ComfyUI-Florence2"]
+	path = vendor/ComfyUI-Florence2
+	url = https://github.com/kijai/ComfyUI-Florence2.git
