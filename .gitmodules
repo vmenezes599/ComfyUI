@@ -31,3 +31,6 @@
 [submodule "vendor/ComfyUI-Florence2"]
 	path = vendor/ComfyUI-Florence2
 	url = https://github.com/kijai/ComfyUI-Florence2.git
+[submodule "vendor/ComfyUI-Base-Directory"]
+	path = vendor/ComfyUI-Base-Directory
+	url = git@github.com:vmenezes599/ComfyUI-Base-Directory.git
